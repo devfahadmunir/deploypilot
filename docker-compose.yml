@@ -1,0 +1,22 @@
+services:
+  db:
+    # PostgreSQL 16 with the pgvector extension (we'll use it for RAG in Phase 3)
+    image: pgvector/pgvector:pg16
+    container_name: acme-db
+    environment:
+      POSTGRES_USER: acme
+      POSTGRES_PASSWORD: acme
+      POSTGRES_DB: acme
+    ports:
+      - "5432:5432"
+    volumes:
+      - acme_data:/var/lib/postgresql/data
+      - ./acme/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acme -d acme"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  acme_data:
