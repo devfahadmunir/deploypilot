@@ -59,10 +59,66 @@ These cases test whether the AI applies business rules correctly, not just wheth
 
 ---
 
+## Phase 1: MCP server (read-only)
+
+`server/acme_server.py` exposes Acme's systems through MCP, using the official Python SDK (v2, `MCPServer`).
+
+| Primitive | Name | What it does |
+|---|---|---|
+| Tool | `get_customer(email)` | Profile, tier, order count, total spent, open tickets |
+| Tool | `list_orders(email, limit)` | Recent orders with status and dates |
+| Tool | `get_order(order_id)` | Items, customer tier, days since delivery, refunds |
+| Tool | `list_tickets(email, include_resolved)` | Support tickets |
+| Resource | `acme://policies` | Index of company policies |
+| Resource | `acme://policies/{name}` | One policy document |
+| Prompt | `summarize_customer(email)` | Account summary workflow for support agents |
+| Prompt | `check_refund_eligibility(order_id)` | Applies the refund policy to an order |
+
+**Design decisions**
+- **Read-only by design:** every tool is annotated `read_only_hint=True`, and the database connection itself is opened in read-only mode, so writes are refused at the database level, not just by convention. Write actions arrive in Phase 4 with permission and confirmation controls.
+- **Safe errors:** expected problems (invalid email, unknown order) raise `ToolError`, so the model gets an actionable message. Unexpected failures are logged server-side and the model only sees a generic error, so internals never leak.
+- **Allow-listed resources:** policy names are checked against the knowledge base, which blocks path-traversal tricks.
+- **stdio-safe logging:** all logs go to stderr, because stdout carries the MCP protocol.
+
+### Run the smoke test
+
+```bash
+python scripts/smoke_test.py
+```
+
+This starts the server, connects as an MCP client, and calls every tool, resource, and prompt.
+
+### Explore it in the MCP Inspector
+
+Requires Node.js (for `npx`).
+
+```bash
+mcp dev server/acme_server.py
+```
+
+### Connect it to Claude Desktop
+
+Open **Claude Desktop → Settings → Developer → Edit Config** and add (use your own absolute paths):
+
+```json
+{
+  "mcpServers": {
+    "acme-store": {
+      "command": "/ABSOLUTE/PATH/TO/deploypilot/.venv/bin/python",
+      "args": ["/ABSOLUTE/PATH/TO/deploypilot/server/acme_server.py"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop, then try: *"Is Ali Raza's order eligible for a refund? His email is ali.raza@example.com."*
+
+---
+
 ## Roadmap
 
 - [x] **Phase 0:** Acme backend (database, seed data, knowledge base)
-- [ ] **Phase 1:** MCP fundamentals: tools, resources, prompts
+- [x] **Phase 1:** MCP fundamentals: tools, resources, prompts
 - [ ] **Phase 2:** Database integration with validation and error handling
 - [ ] **Phase 3:** RAG over the knowledge base with pgvector
 - [ ] **Phase 4:** Remote transport, auth, permissions, and confirmation for risky actions
