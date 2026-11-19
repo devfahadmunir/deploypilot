@@ -1,0 +1,16 @@
+[
+  {"question": "Can I return headphones six weeks after they were delivered?", "expected": ["refund_policy"]},
+  {"question": "How long does express delivery take?", "expected": ["shipping_policy"]},
+  {"question": "My package still hasn't arrived two weeks after it shipped. What happens now?", "expected": ["shipping_policy"]},
+  {"question": "Do I have to pay for return shipping?", "expected": ["returns_process"]},
+  {"question": "My air fryer stopped working after 18 months. Is it covered?", "expected": ["warranty"]},
+  {"question": "What benefits do premium members get?", "expected": ["membership"]},
+  {"question": "How can I become a premium member?", "expected": ["membership", "faq"]},
+  {"question": "I was charged twice for the same order.", "expected": ["faq"]},
+  {"question": "Which payment methods can I use?", "expected": ["faq"]},
+  {"question": "Who needs to approve a refund of 700 dollars?", "expected": ["refund_policy", "support_guidelines"]},
+  {"question": "A customer has four unresolved tickets. What should the agent do?", "expected": ["support_guidelines"]},
+  {"question": "Can I change my delivery address after the order has shipped?", "expected": ["shipping_policy", "faq"]},
+  {"question": "Are gift cards refundable?", "expected": ["refund_policy"]},
+  {"question": "Is water damage on my headphones covered?", "expected": ["warranty"]}
+]

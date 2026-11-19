@@ -1,8 +1,9 @@
 """
-DeployPilot: Acme Store MCP server (Phase 1, read-only).
+DeployPilot: Acme Store MCP server (Phase 3: RAG over the knowledge base).
 
 Exposes Acme's systems to any MCP client:
-  - Tools:     look up customers, orders, and tickets (the model decides when to call them)
+  - Tools:     look up customers, orders, and tickets; open support tickets;
+               semantic search over company policies (the model decides when to call them)
   - Resources: company policies from the knowledge base (the app/user attaches them)
   - Prompts:   reusable workflows for support agents (the user picks them)
 
@@ -20,37 +21,37 @@ Error handling (MCP SDK v2):
 """
 
 import logging
-import os
 import re
 import sys
-from datetime import datetime
-from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Literal
 
-import psycopg
-from dotenv import load_dotenv
-from mcp.server import MCPServer
-from mcp.server.mcpserver.exceptions import ResourceNotFoundError, ToolError
-from mcp.types import ToolAnnotations
-from psycopg.rows import dict_row
+# Make the project root importable, so `from server.db import ...` works whether
+# this file is run directly, by `mcp dev`, by Claude Desktop, or by pytest.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mcp.server import MCPServer  # noqa: E402
+from mcp.server.mcpserver.exceptions import ResourceNotFoundError, ToolError  # noqa: E402
+from mcp.types import ToolAnnotations  # noqa: E402
+import psycopg  # noqa: E402
+from pydantic import Field  # noqa: E402
+
+from server.db import PROJECT_ROOT, audit, clean, query, write_transaction  # noqa: E402
+from server.rag.embeddings import MODEL_NAME, EmbeddingError, embed_query, to_pgvector  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_BASE = PROJECT_ROOT / "acme" / "knowledge_base"
 
-# Load .env from the project root, so this works no matter which folder
-# the MCP host launches the server from.
-load_dotenv(PROJECT_ROOT / ".env")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://acme:acme@localhost:5432/acme")
-
-logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("acme-mcp")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# Hints that tell MCP clients how risky each tool is.
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
+SAFE_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
 
 mcp = MCPServer(
     name="acme-store",
@@ -58,41 +59,15 @@ mcp = MCPServer(
     instructions=(
         "Tools and documents for Acme Store customer support. "
         "Always identify customers by email before discussing their orders. "
+        "For any policy question, use search_knowledge_base and cite the source it returns. "
         "Check the refund policy and the customer's tier before answering refund questions."
     ),
 )
 
 
 # ---------------------------------------------------------------------------
-# Database helpers
+# Helpers
 # ---------------------------------------------------------------------------
-def _clean(value: Any) -> Any:
-    """Convert DB types (Decimal, datetime) into JSON-friendly values."""
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {k: _clean(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_clean(v) for v in value]
-    return value
-
-
-def query(sql: str, params: tuple | dict = ()) -> list[dict]:
-    """Run a read-only query and return rows as dicts."""
-    try:
-        with psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5) as conn:
-            conn.read_only = True  # the database itself refuses writes from this connection
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                return _clean(cur.fetchall())
-    except psycopg.OperationalError as exc:
-        # Log the real cause on the server; give the model a safe, actionable message.
-        log.error("Database unavailable: %s", exc)
-        raise ToolError("The Acme database is unavailable right now. Please try again shortly.") from exc
-
-
 def _find_customer(email: str) -> dict:
     email = email.strip().lower()
     if not EMAIL_RE.match(email):
@@ -184,6 +159,89 @@ def list_tickets(email: str, include_resolved: bool = False) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Knowledge base search (RAG)
+# ---------------------------------------------------------------------------
+@mcp.tool(annotations=READ_ONLY)
+def search_knowledge_base(
+    question: Annotated[str, Field(min_length=3, max_length=500, description="The question, in natural language")],
+    top_k: Annotated[int, Field(ge=1, le=8, description="How many passages to return")] = 4,
+) -> list[dict]:
+    """Semantic search over Acme Store's internal policies (refunds, shipping,
+    returns, warranty, membership, support guidelines, FAQ). Use it for any
+    question about rules or procedures. Returns the most relevant passages,
+    best first, with a similarity score (0 to 1) and a source URI. Base your
+    answer on these passages and cite the source."""
+    try:
+        vector = to_pgvector(embed_query(question))
+    except EmbeddingError as exc:
+        log.error("Embedding failed: %s", exc)  # full detail stays in the server log
+        raise ToolError("Knowledge base search is temporarily unavailable. Please try again shortly.") from exc
+
+    try:
+        rows = query(
+            """SELECT doc, section, content,
+                      ROUND((1 - (embedding <=> %(v)s::vector))::numeric, 3) AS score
+               FROM kb_chunks
+               WHERE model = %(m)s
+               ORDER BY embedding <=> %(v)s::vector
+               LIMIT %(k)s""",
+            {"v": vector, "m": MODEL_NAME, "k": top_k},
+        )
+    except psycopg.errors.UndefinedTable as exc:
+        raise ToolError("The knowledge base is not set up yet. Apply migration 003 and run scripts/ingest_kb.py.") from exc
+    if not rows:
+        # Vectors from different models are not comparable, so never mix them.
+        raise ToolError(f"The knowledge base has no entries for {MODEL_NAME}. Run scripts/ingest_kb.py to index it.")
+    for row in rows:
+        row["source"] = f"acme://policies/{row['doc']}"
+    log.info("search_knowledge_base top_k=%d best=%s (%.3f)", top_k, rows[0]["doc"], rows[0]["score"])
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Write tools
+# ---------------------------------------------------------------------------
+@mcp.tool(annotations=SAFE_WRITE)
+def create_ticket(
+    email: str,
+    subject: Annotated[str, Field(min_length=3, max_length=120, description="Short summary of the issue")],
+    description: Annotated[str, Field(min_length=10, max_length=2000, description="Details of the issue")],
+    priority: Literal["low", "medium", "high"] = "medium",
+    order_id: int | None = None,
+) -> dict:
+    """Open a new support ticket for a customer. Link it to an order with
+    order_id when the issue is about a specific order (the order must belong
+    to this customer). Priority per support guidelines: high for damaged or
+    wrong items, double charges, and lost packages; medium for refund requests
+    and order problems; low for general and warranty questions."""
+    customer = _find_customer(email)
+    subject, description = subject.strip(), description.strip()
+
+    with write_transaction() as conn:
+        if order_id is not None:
+            order = conn.execute("SELECT customer_id FROM orders WHERE id = %s", (order_id,)).fetchone()
+            if order is None:
+                raise ToolError(f"Order {order_id} does not exist.")
+            if order["customer_id"] != customer["id"]:
+                # Never let one customer's ticket touch another customer's order.
+                raise ToolError(f"Order {order_id} does not belong to {customer['email']}.")
+
+        ticket = conn.execute(
+            """INSERT INTO tickets (customer_id, order_id, subject, description, priority, status)
+               VALUES (%s, %s, %s, %s, %s, 'open')
+               RETURNING id AS ticket_id, order_id, subject, priority, status, created_at""",
+            (customer["id"], order_id, subject, description, priority),
+        ).fetchone()
+
+        audit(conn, "create_ticket",
+              {"email": customer["email"], "subject": subject, "priority": priority, "order_id": order_id},
+              ticket)
+
+    log.info("create_ticket ticket_id=%s email=%s", ticket["ticket_id"], customer["email"])
+    return clean({**ticket, "customer_email": customer["email"]})
+
+
+# ---------------------------------------------------------------------------
 # Resources (application-controlled)
 # ---------------------------------------------------------------------------
 def _policy_names() -> list[str]:
@@ -227,7 +285,7 @@ def check_refund_eligibility(order_id: int) -> str:
     """Decide whether an order is eligible for a refund under Acme's policy."""
     return (
         f"Check whether order {order_id} is eligible for a refund.\n"
-        "1. Read the refund policy resource (acme://policies/refund_policy).\n"
+        "1. Use search_knowledge_base to find the refund rules that apply.\n"
         f"2. Use get_order to get order {order_id}'s status, customer tier, "
         "days since delivery, and existing refunds.\n"
         "3. Apply the policy: the refund window depends on the customer's tier, "

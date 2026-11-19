@@ -71,3 +71,28 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer  ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_items_order      ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_customer ON tickets(customer_id);
 CREATE INDEX IF NOT EXISTS idx_refunds_order    ON refunds(order_id);
+
+-- Added in Phase 2 (existing databases: apply acme/db/migrations/002_audit_log.sql)
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          BIGSERIAL   PRIMARY KEY,
+    tool        TEXT        NOT NULL,
+    arguments   JSONB       NOT NULL,
+    result      JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_tool_time ON audit_log(tool, created_at DESC);
+
+-- Added in Phase 3 (existing databases: apply acme/db/migrations/003_knowledge_base.sql)
+CREATE TABLE IF NOT EXISTS kb_chunks (
+    id            BIGSERIAL   PRIMARY KEY,
+    doc           TEXT        NOT NULL,
+    section       TEXT        NOT NULL,
+    chunk_index   INTEGER     NOT NULL,
+    content       TEXT        NOT NULL,
+    content_hash  TEXT        NOT NULL,
+    model         TEXT        NOT NULL,
+    embedding     vector(384) NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (doc, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding ON kb_chunks USING hnsw (embedding vector_cosine_ops);

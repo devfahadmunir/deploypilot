@@ -124,7 +124,7 @@ def insert_ticket(cur, customer_id, order_id, subject, priority, status, created
         """INSERT INTO tickets (customer_id, order_id, subject, description, status, priority, created_at, updated_at)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
         (customer_id, order_id, subject, fake.sentence(nb_words=14), status, priority,
-         created, created + timedelta(hours=random.randint(1, 72))),
+         created, min(created + timedelta(hours=random.randint(1, 72)), NOW)),
     )
 
 
@@ -151,7 +151,7 @@ def lifecycle(age_days: float):
 def main():
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         print("Clearing existing data...")
-        cur.execute("TRUNCATE tickets, refunds, order_items, orders, products, customers RESTART IDENTITY CASCADE")
+        cur.execute("TRUNCATE audit_log, tickets, refunds, order_items, orders, products, customers RESTART IDENTITY CASCADE")
 
         # Products
         print("Creating products...")
