@@ -257,6 +257,26 @@ To allow writes from Claude Desktop (stdio), add `"env": {"MCP_ROLE": "agent"}` 
 
 ---
 
+## Phase 5: Custom agent client
+
+`agent/agent.py` is a terminal support agent: Gemini picks the tool, the MCP server runs it.
+
+- **Hand-written tool loop:** no agent framework, so every step is visible.
+- **Tools discovered at run time** from the server, so a new server tool needs no agent change.
+- **Human approval stays outside the model:** the server's confirmation request goes to the person at the terminal.
+- **Bounded:** at most 8 model steps per question. Tool errors are returned to the model so it can recover.
+- **Data note:** tool results (customer data) are sent to Google. The data here is synthetic; a real client would need an agreed data-processing setup.
+
+Add `GEMINI_API_KEY` to `.env`, start the server over HTTP, then in a second terminal:
+
+```bash
+python agent/agent.py
+```
+
+Use `python agent/agent.py viewer` for a read-only session, and set `GEMINI_MODEL` to change the model.
+
+---
+
 ## Roadmap
 
 - [x] **Phase 0:** Acme backend (database, seed data, knowledge base)
@@ -264,7 +284,7 @@ To allow writes from Claude Desktop (stdio), add `"env": {"MCP_ROLE": "agent"}` 
 - [x] **Phase 2:** First write action, audit log, connection pooling, migrations, tests
 - [x] **Phase 3:** RAG over the knowledge base with pgvector
 - [x] **Phase 4:** Remote transport, auth, permissions, and confirmation for risky actions
-- [ ] **Phase 5:** Custom agent client
+- [x] **Phase 5:** Custom agent client
 - [ ] **Phase 6:** Evals, cost tracking, Docker deployment
 
 ---

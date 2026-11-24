@@ -3,5 +3,6 @@ psycopg[binary,pool]>=3.1
 python-dotenv>=1.0
 mcp[cli]>=2.3,<3
 pytest>=8.0
+google-genai>=3.6,<4
 # Embeddings run in Ollama by default (no Python package needed).
 # Optional in-process alternative (Python <= 3.14): pip install fastembed

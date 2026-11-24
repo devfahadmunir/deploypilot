@@ -340,7 +340,11 @@ def issue_refund(
     before money moves. Partial refunds are not supported: open a ticket instead."""
     require_write()
     if not approval.approve:
-        raise ToolError("The refund was not approved. Nothing was changed.")
+        raise ToolError(
+            "The refund was not approved: the person asked to confirm it said no. Nothing was changed. "
+            "This is their final decision. Do not retry, open a ticket, or take any other action unless "
+            "the user asks. Tell the user the refund was declined."
+        )
 
     with write_transaction() as conn:
         # Check again with the row locked: things may have changed while the human decided.
