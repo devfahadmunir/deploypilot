@@ -21,6 +21,7 @@ Error handling (MCP SDK v2):
 """
 
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -296,4 +297,8 @@ def check_refund_eligibility(order_id: int) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()  # stdio transport by default
+    if os.getenv("MCP_TRANSPORT") == "http":
+        # Stateless: no session kept between requests, so any replica can serve any call.
+        mcp.run("streamable-http", stateless_http=True)  # http://127.0.0.1:8000/mcp
+    else:
+        mcp.run()  # stdio, used by Claude Desktop and the smoke test
