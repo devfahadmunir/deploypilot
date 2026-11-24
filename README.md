@@ -203,9 +203,57 @@ pytest -v
 
 | Metric | Score |
 |---|---|
-| Hit@1 | `[fill in from eval_retrieval.py]` |
-| Hit@3 | `[fill in]` |
-| MRR | `[fill in]` |
+| Hit@1 | 93% |
+| Hit@3 | 100% |
+| MRR | 0.95 |
+
+Measured on 14 labeled questions with `all-minilm`. The one miss at rank 1 ("Can I return headphones six weeks after they were delivered?") ranks the refund policy third, behind the shipping policy.
+
+---
+
+## Phase 4: Remote transport, auth, and safe writes
+
+| Piece | Details |
+|---|---|
+| Transport | Streamable HTTP, stateless (`MCP_TRANSPORT=http`). stdio stays the default |
+| Authentication | Bearer API keys; a missing or wrong key gets 401 |
+| Authorization | `viewer` keys can only read; `agent` keys can also write. Local stdio is read-only unless `MCP_ROLE=agent` |
+| Refunds | `issue_refund(order_id, email, reason)`: delivered orders only, 30/60-day window by tier, no double refunds, $500 limit |
+| Human approval | The server asks the person through MCP elicitation. The model cannot supply the answer |
+| Tool-call log | Every call (reads, failures, denials) is recorded in `tool_calls` with caller, outcome, and duration |
+
+**Design decisions**
+- **Defense in depth for refunds:** role check, policy checks, human approval, a second check with the order row locked, and a unique index that stops a double refund in the database itself.
+- **Two logs, two purposes:** `audit_log` is written in the same transaction as each change. `tool_calls` is best-effort observability and never breaks a call.
+- **Least privilege:** the default role is read-only.
+
+**Known limits (not production-ready yet)**
+- Static shared keys, not OAuth: no expiry or per-person identity. Rotating a key needs a restart.
+- Needs HTTPS in front of it; over plain HTTP the key is readable in transit.
+- The approval state is signed with a per-process key, so running several replicas needs a shared `request_state_security` key.
+- `tool_calls` stores arguments, including customer emails and ticket text, with no retention or redaction policy.
+- Clients without elicitation support cannot issue refunds.
+
+### Run it
+
+```bash
+docker exec -i acme-db psql -U acme -d acme < acme/db/migrations/004_phase4.sql
+```
+
+Add `MCP_VIEWER_KEY` and `MCP_AGENT_KEY` to `.env` (see `.env.example`), then start the server:
+
+```bash
+MCP_TRANSPORT=http python server/acme_server.py
+```
+
+In a second terminal:
+
+```bash
+python scripts/try_tool.py viewer get_customer '{"email": "ali.raza@example.com"}'
+python scripts/try_tool.py agent issue_refund '{"order_id": 1, "email": "sarah.khan@example.com", "reason": "Changed my mind"}'
+```
+
+To allow writes from Claude Desktop (stdio), add `"env": {"MCP_ROLE": "agent"}` to its server config.
 
 ---
 
@@ -215,7 +263,7 @@ pytest -v
 - [x] **Phase 1:** MCP fundamentals: tools, resources, prompts
 - [x] **Phase 2:** First write action, audit log, connection pooling, migrations, tests
 - [x] **Phase 3:** RAG over the knowledge base with pgvector
-- [ ] **Phase 4:** Remote transport, auth, permissions, and confirmation for risky actions
+- [x] **Phase 4:** Remote transport, auth, permissions, and confirmation for risky actions
 - [ ] **Phase 5:** Custom agent client
 - [ ] **Phase 6:** Evals, cost tracking, Docker deployment
 

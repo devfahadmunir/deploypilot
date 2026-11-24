@@ -98,3 +98,16 @@ def audit(conn: psycopg.Connection, tool: str, arguments: dict, result: dict) ->
         "INSERT INTO audit_log (tool, arguments, result) VALUES (%s, %s, %s)",
         (tool, Jsonb(clean(arguments)), Jsonb(clean(result))),
     )
+
+
+def log_tool_call(tool: str, arguments: dict, client_id: str, outcome: str, error: str | None, duration_ms: int) -> None:
+    """Observability for every tool call. Never lets a logging problem break the call."""
+    try:
+        with get_pool().connection() as conn:
+            conn.execute(
+                """INSERT INTO tool_calls (tool, arguments, client_id, outcome, error, duration_ms)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (tool, Jsonb(arguments), client_id, outcome, error, duration_ms),
+            )
+    except Exception:  # ponytail: drop and log; add a queue if these records must never be lost
+        log.exception("Could not record tool call %s", tool)

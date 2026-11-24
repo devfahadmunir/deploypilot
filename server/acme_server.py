@@ -1,5 +1,5 @@
 """
-DeployPilot: Acme Store MCP server (Phase 3: RAG over the knowledge base).
+DeployPilot: Acme Store MCP server (Phase 4: remote transport, auth, safe writes).
 
 Exposes Acme's systems to any MCP client:
   - Tools:     look up customers, orders, and tickets; open support tickets;
@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -31,14 +32,16 @@ from typing import Annotated, Literal
 # this file is run directly, by `mcp dev`, by Claude Desktop, or by pytest.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import anyio  # noqa: E402
 from mcp.server import MCPServer  # noqa: E402
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError, ToolError  # noqa: E402
+from mcp.server.mcpserver.resolve import Elicit, Resolve  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
 import psycopg  # noqa: E402
-from pydantic import Field  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
-from server.auth import AUTH_SETTINGS, ApiKeyVerifier  # noqa: E402
-from server.db import PROJECT_ROOT, audit, clean, query, write_transaction  # noqa: E402
+from server.auth import AUTH_SETTINGS, ApiKeyVerifier, caller, require_write  # noqa: E402
+from server.db import PROJECT_ROOT, audit, clean, log_tool_call, query, write_transaction  # noqa: E402
 from server.rag.embeddings import MODEL_NAME, EmbeddingError, embed_query, to_pgvector  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -54,12 +57,43 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Hints that tell MCP clients how risky each tool is.
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 SAFE_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
+DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False)
+
+# Business rules from the knowledge base (refund_policy, support_guidelines).
+REFUND_WINDOW_DAYS = {"standard": 30, "premium": 60}
+SUPERVISOR_LIMIT = 500
+
+
+async def log_tool_calls(ctx, call_next):
+    """Server middleware: record every tool call, including denied and invalid ones."""
+    if ctx.method != "tools/call":
+        return await call_next(ctx)
+    started = time.perf_counter()
+    outcome, error = "error", "request failed before the tool returned"
+    try:
+        result = await call_next(ctx)
+        data = result if isinstance(result, dict) else result.model_dump(by_alias=True, mode="json")
+        if data.get("resultType") == "input_required":
+            outcome, error = "input_required", None
+        elif data.get("isError"):
+            error = " ".join(block.get("text", "") for block in data.get("content", []))
+        else:
+            outcome, error = "ok", None
+        return result
+    finally:
+        params = ctx.params or {}
+        await anyio.to_thread.run_sync(
+            log_tool_call, str(params.get("name")), params.get("arguments") or {}, caller()[0],
+            outcome, error, int((time.perf_counter() - started) * 1000),
+        )
+
 
 mcp = MCPServer(
     name="acme-store",
     title="Acme Store Systems",
     token_verifier=ApiKeyVerifier(),  # only enforced over HTTP, not stdio
     auth=AUTH_SETTINGS,
+    middleware=[log_tool_calls],
     instructions=(
         "Tools and documents for Acme Store customer support. "
         "Always identify customers by email before discussing their orders. "
@@ -218,6 +252,7 @@ def create_ticket(
     to this customer). Priority per support guidelines: high for damaged or
     wrong items, double charges, and lost packages; medium for refund requests
     and order problems; low for general and warranty questions."""
+    require_write()
     customer = _find_customer(email)
     subject, description = subject.strip(), description.strip()
 
@@ -243,6 +278,86 @@ def create_ticket(
 
     log.info("create_ticket ticket_id=%s email=%s", ticket["ticket_id"], customer["email"])
     return clean({**ticket, "customer_email": customer["email"]})
+
+
+def _refundable_order(run, order_id: int, email: str, lock: str = "") -> dict:
+    """Return the order if policy allows refunding it, else raise ToolError.
+    `run(sql, params)` returns rows, so the same rules serve the read-only preview
+    and the locked check inside the write transaction."""
+    customer = _find_customer(email)
+    rows = run(
+        f"""SELECT id AS order_id, customer_id, status, total,
+                   FLOOR(EXTRACT(EPOCH FROM now() - delivered_at) / 86400)::int AS days
+            FROM orders WHERE id = %s {lock}""",
+        (order_id,),
+    )
+    if not rows:
+        raise ToolError(f"Order {order_id} does not exist.")
+    order = rows[0]
+    if order["customer_id"] != customer["id"]:
+        raise ToolError(f"Order {order_id} does not belong to {customer['email']}.")
+    if run("SELECT 1 FROM refunds WHERE order_id = %s AND status <> 'rejected'", (order_id,)):
+        raise ToolError(f"Order {order_id} has already been refunded.")
+    if order["status"] != "delivered" or order["days"] is None:
+        raise ToolError(f"Order {order_id} is '{order['status']}'. Only delivered orders can be refunded.")
+    window = REFUND_WINDOW_DAYS[customer["tier"]]
+    if order["days"] > window:
+        raise ToolError(
+            f"Order {order_id} was delivered {order['days']} days ago, outside the {window}-day window for "
+            f"{customer['tier']} customers. If the item was damaged or wrong (90-day exception), open a ticket "
+            "so a person can verify it."
+        )
+    if order["total"] > SUPERVISOR_LIMIT:
+        raise ToolError(
+            f"Refunds above ${SUPERVISOR_LIMIT} need supervisor approval. Open a ticket to escalate order {order_id}."
+        )
+    return {**order, "customer_email": customer["email"]}
+
+
+class RefundApproval(BaseModel):
+    approve: bool = Field(description="Approve this refund?")
+
+
+def confirm_refund(order_id: int, email: str) -> Elicit[RefundApproval]:
+    """Runs before issue_refund: refuse early, otherwise ask the human. The model
+    cannot supply this answer, because it is not one of the tool's arguments."""
+    require_write()
+    order = _refundable_order(query, order_id, email)
+    return Elicit(
+        f"Refund ${order['total']:.2f} for order {order_id} to {order['customer_email']}?", RefundApproval
+    )
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def issue_refund(
+    order_id: int,
+    email: str,
+    reason: Annotated[str, Field(min_length=5, max_length=500, description="Why the customer wants a refund")],
+    approval: Annotated[RefundApproval, Resolve(confirm_refund)],
+) -> dict:
+    """Refund the full total of a delivered order. Policy is enforced by the server
+    (refund window by tier, no double refunds, $500 limit) and a human must approve
+    before money moves. Partial refunds are not supported: open a ticket instead."""
+    require_write()
+    if not approval.approve:
+        raise ToolError("The refund was not approved. Nothing was changed.")
+
+    with write_transaction() as conn:
+        # Check again with the row locked: things may have changed while the human decided.
+        order = _refundable_order(
+            lambda sql, params: conn.execute(sql, params).fetchall(), order_id, email, lock="FOR UPDATE"
+        )
+        refund = conn.execute(
+            """INSERT INTO refunds (order_id, amount, reason, status) VALUES (%s, %s, %s, 'completed')
+               RETURNING id AS refund_id, order_id, amount, status, created_at""",
+            (order_id, order["total"], reason.strip()),
+        ).fetchone()
+        conn.execute("UPDATE orders SET status = 'refunded' WHERE id = %s", (order_id,))
+        audit(conn, "issue_refund",
+              {"email": order["customer_email"], "order_id": order_id, "reason": reason.strip()}, refund)
+
+    log.info("issue_refund refund_id=%s order_id=%s", refund["refund_id"], order_id)
+    return clean(refund)
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +408,8 @@ def check_refund_eligibility(order_id: int) -> str:
         f"2. Use get_order to get order {order_id}'s status, customer tier, "
         "days since delivery, and existing refunds.\n"
         "3. Apply the policy: the refund window depends on the customer's tier, "
-        "only delivered orders can be refunded, and already-refunded orders cannot be refunded again.\n"
+        "only delivered orders can be refunded, and already-refunded orders cannot be refunded again. "
+        "Damaged or wrong items have a 90-day exception.\n"
         "Answer ELIGIBLE or NOT ELIGIBLE, then explain which rule decided it. "
         "Note if the amount requires supervisor approval."
     )

@@ -50,7 +50,7 @@ def test_all_tools_are_exposed():
         async with Client(mcp) as client:
             return await client.list_tools()
     tools = {t.name: t for t in asyncio.run(_run()).tools}
-    assert set(tools) == {"get_customer", "list_orders", "get_order", "list_tickets", "create_ticket", "search_knowledge_base"}
+    assert set(tools) == {"get_customer", "list_orders", "get_order", "list_tickets", "create_ticket", "search_knowledge_base", "issue_refund"}
     assert tools["get_customer"].annotations.read_only_hint is True
     assert tools["create_ticket"].annotations.read_only_hint is False
 

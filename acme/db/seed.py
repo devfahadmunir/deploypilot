@@ -151,7 +151,7 @@ def lifecycle(age_days: float):
 def main():
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         print("Clearing existing data...")
-        cur.execute("TRUNCATE audit_log, tickets, refunds, order_items, orders, products, customers RESTART IDENTITY CASCADE")
+        cur.execute("TRUNCATE tool_calls, audit_log, tickets, refunds, order_items, orders, products, customers RESTART IDENTITY CASCADE")
 
         # Products
         print("Creating products...")

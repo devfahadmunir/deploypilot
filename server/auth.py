@@ -3,8 +3,10 @@
 import hmac
 import os
 
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
+from mcp.server.mcpserver.exceptions import ToolError
 
 # role -> (env variable holding its key, scopes that role gets)
 ROLES = {
@@ -25,3 +27,20 @@ class ApiKeyVerifier(TokenVerifier):
 
 # issuer_url is mandatory in the SDK; with static keys there is no real issuer.
 AUTH_SETTINGS = AuthSettings(issuer_url="http://127.0.0.1:8000", resource_server_url=None)
+
+
+def caller() -> tuple[str, list[str]]:
+    """(client id, scopes) of whoever is making the current request."""
+    token = get_access_token()
+    if token:
+        return token.client_id, token.scopes
+    # No token means stdio or in-memory (HTTP never gets this far without one).
+    # Least privilege: read-only unless MCP_ROLE says otherwise.
+    role = os.getenv("MCP_ROLE", "viewer")
+    return f"local:{role}", ROLES.get(role, ROLES["viewer"])[1]
+
+
+def require_write() -> None:
+    client_id, scopes = caller()
+    if "write" not in scopes:
+        raise ToolError(f"Permission denied: '{client_id}' is read-only and cannot make changes.")
