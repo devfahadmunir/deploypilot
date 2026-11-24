@@ -37,6 +37,7 @@ from mcp.types import ToolAnnotations  # noqa: E402
 import psycopg  # noqa: E402
 from pydantic import Field  # noqa: E402
 
+from server.auth import AUTH_SETTINGS, ApiKeyVerifier  # noqa: E402
 from server.db import PROJECT_ROOT, audit, clean, query, write_transaction  # noqa: E402
 from server.rag.embeddings import MODEL_NAME, EmbeddingError, embed_query, to_pgvector  # noqa: E402
 
@@ -57,6 +58,8 @@ SAFE_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idemp
 mcp = MCPServer(
     name="acme-store",
     title="Acme Store Systems",
+    token_verifier=ApiKeyVerifier(),  # only enforced over HTTP, not stdio
+    auth=AUTH_SETTINGS,
     instructions=(
         "Tools and documents for Acme Store customer support. "
         "Always identify customers by email before discussing their orders. "
