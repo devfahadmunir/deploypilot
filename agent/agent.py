@@ -26,13 +26,28 @@ from mcp.types import ElicitResult
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 URL = os.getenv("MCP_URL", "http://127.0.0.1:8000/mcp")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 MAX_STEPS = 8  # stops a confused model from calling tools forever
+
+# USD per 1M (input, output incl. thinking) tokens, paid tier, ai.google.dev pricing, checked 2026-11-25.
+# gemini-3.8-flash rises to (1.50, 7.50) on 2027-01-01. Free-tier use costs nothing.
+PRICES = {"gemini-3.8-flash": (0.75, 3.75), "gemini-3.5-flash-lite": (0.30, 2.50)}
+
+
+def cost_usd(input_tokens: int, output_tokens: int) -> float | None:
+    """Estimated cost, or None for a model whose price is not listed above."""
+    if MODEL not in PRICES:
+        return None
+    input_price, output_price = PRICES[MODEL]
+    return (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
 
 def make_llm():
     """Return `generate(contents, config)` backed by Gemini. Tests pass a fake instead."""
-    client = genai.Client(http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=4)))
+    client = genai.Client(http_options=types.HttpOptions(
+        timeout=60_000,  # milliseconds; without it a stuck request hangs forever
+        retry_options=types.HttpRetryOptions(attempts=3),
+    ))
 
     async def generate(contents, config):
         return await client.aio.models.generate_content(model=MODEL, contents=contents, config=config)
@@ -108,16 +123,22 @@ async def main(role: str = "agent"):
         async with Client(streamable_http_client(URL, http_client=http), elicitation_callback=ask_human) as client:
             print(f"Acme support agent ({role}, {MODEL}). Empty line to quit.")
             history: list = []
+            total_cost = 0.0
             while question := input("\nYou: ").strip():
                 turn_start = len(history)
                 try:
                     result = await ask(generate, client, history, question)
-                except errors.APIError as exc:
+                except (errors.APIError, httpx2.TransportError) as exc:  # transport: timeouts, network
                     del history[turn_start:]  # drop the half-finished turn
-                    print(f"Model error {exc.code}: {exc.message}")
+                    print(f"Model unavailable: {exc}")
                     continue
                 print(f"\nAgent: {result['answer']}")
-                print(f"  [{result['input_tokens']} input / {result['output_tokens']} output tokens]")
+                usage = f"{result['input_tokens']} input / {result['output_tokens']} output tokens"
+                cost = cost_usd(result["input_tokens"], result["output_tokens"])
+                if cost is not None:
+                    total_cost += cost
+                    usage += f", ${cost:.4f}, conversation ${total_cost:.4f}"
+                print(f"  [{usage}]")
 
 
 if __name__ == "__main__":

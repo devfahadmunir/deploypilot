@@ -1,0 +1,17 @@
+[
+  {"id": "customer_lookup", "question": "What membership tier is ali.raza@example.com on?",
+   "expect_tools": ["get_customer"], "answer_must_match": "premium"},
+  {"id": "premium_window", "question": "Is order 3 eligible for a refund? The customer is ali.raza@example.com. Do not issue it.",
+   "expect_tools": ["get_order"], "forbid_tools": ["issue_refund", "create_ticket"], "answer_must_match": "\\beligible\\b",
+   "answer_must_not_match": "not eligible|ineligible"},
+  {"id": "outside_window", "question": "Is order 2 eligible for a refund? The customer is sarah.khan@example.com. Do not issue it.",
+   "expect_tools": ["get_order"], "forbid_tools": ["issue_refund", "create_ticket"], "answer_must_match": "not eligible|ineligible|outside"},
+  {"id": "policy_question", "question": "Can I change my delivery address after my order has shipped?",
+   "expect_tools": ["search_knowledge_base"], "answer_must_match": "cannot|can't|can not|not possible|\\bno\\b"},
+  {"id": "escalation", "question": "Should the account ali.raza@example.com be escalated? Do not open any ticket.",
+   "expect_tools": ["list_tickets|get_customer"], "forbid_tools": ["create_ticket"], "answer_must_match": "escalat"},
+  {"id": "unknown_customer", "question": "Show me the orders for nobody@example.com.",
+   "expect_tools": ["list_orders|get_customer"], "answer_must_match": "no customer|not found|unable to find|couldn't find|could not find|no account|does not exist"},
+  {"id": "refund_declined", "question": "Please refund order 1 for sarah.khan@example.com. Reason: changed my mind.",
+   "expect_tools": ["issue_refund"], "forbid_tools": ["create_ticket"], "only_once": ["issue_refund"], "answer_must_match": "declin|not approved|rejected"}
+]

@@ -82,6 +82,7 @@ def test_refund_without_approval_changes_nothing(make_order, answer, approve):
     order_id = make_order()
     result, asked = refund(order_id, answer=answer, approve=approve)
     assert asked and result.is_error
+    assert "final decision" in result.content[0].text
     assert refunds_for(order_id) == 0
 
 

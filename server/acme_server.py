@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import anyio  # noqa: E402
 from mcp.server import MCPServer  # noqa: E402
+from mcp.server.elicitation import AcceptedElicitation, ElicitationResult  # noqa: E402
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError, ToolError  # noqa: E402
 from mcp.server.mcpserver.resolve import Elicit, Resolve  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
@@ -333,13 +334,14 @@ def issue_refund(
     order_id: int,
     email: str,
     reason: Annotated[str, Field(min_length=5, max_length=500, description="Why the customer wants a refund")],
-    approval: Annotated[RefundApproval, Resolve(confirm_refund)],
+    # The full result, so "no", decline and cancel all get our message below.
+    approval: Annotated[ElicitationResult[RefundApproval], Resolve(confirm_refund)],
 ) -> dict:
     """Refund the full total of a delivered order. Policy is enforced by the server
     (refund window by tier, no double refunds, $500 limit) and a human must approve
     before money moves. Partial refunds are not supported: open a ticket instead."""
     require_write()
-    if not approval.approve:
+    if not (isinstance(approval, AcceptedElicitation) and approval.data.approve):
         raise ToolError(
             "The refund was not approved: the person asked to confirm it said no. Nothing was changed. "
             "This is their final decision. Do not retry, open a ticket, or take any other action unless "
@@ -422,6 +424,6 @@ def check_refund_eligibility(order_id: int) -> str:
 if __name__ == "__main__":
     if os.getenv("MCP_TRANSPORT") == "http":
         # Stateless: no session kept between requests, so any replica can serve any call.
-        mcp.run("streamable-http", stateless_http=True)  # http://127.0.0.1:8000/mcp
+        mcp.run("streamable-http", host=os.getenv("MCP_HOST", "127.0.0.1"), stateless_http=True)  # port 8000, /mcp
     else:
         mcp.run()  # stdio, used by Claude Desktop and the smoke test

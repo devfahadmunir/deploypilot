@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: acme
       POSTGRES_DB: acme
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - acme_data:/var/lib/postgresql/data
       - ./acme/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
@@ -17,6 +17,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # The MCP server. Only with: docker compose --profile full up -d --build
+  server:
+    profiles: [full]
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://acme:acme@db:5432/acme
+      OLLAMA_URL: http://host.docker.internal:11434  # Ollama runs on the host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   acme_data:

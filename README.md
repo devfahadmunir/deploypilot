@@ -4,7 +4,45 @@
 
 The client is **Acme Store**, a fictional e-commerce company. DeployPilot exposes Acme's order database, support tickets, and internal knowledge base to any MCP-compatible AI client, with safety controls for risky actions like refunds.
 
-> 🚧 Work in progress. Built phase by phase; see the roadmap below.
+```
+ you ──▶ agent/agent.py ──▶ Gemini (picks tools)
+              │  ▲
+   API key    ▼  │ asks you to approve refunds
+        MCP server (Streamable HTTP or stdio)
+         ├─ roles, refund rules, tool-call log
+         ├─ PostgreSQL + pgvector (orders, tickets, policy embeddings)
+         └─ Ollama (local embeddings)
+```
+
+| What | Result |
+|---|---|
+| Retrieval (14 labeled questions) | Hit@1 93%, Hit@3 100%, MRR 0.95 |
+| Agent evals (7 cases, `gemini-3.5-flash-lite`, 2026-11-25) | 7/7 passed |
+| Cost per eval conversation (paid-tier list price) | about $0.0013 |
+
+## Quick start with Docker
+
+Needs Docker, and [Ollama](https://ollama.com) running on the host with `ollama pull all-minilm`.
+
+```bash
+cp .env.example .env
+```
+
+Fill in `MCP_VIEWER_KEY`, `MCP_AGENT_KEY` and `GEMINI_API_KEY` in `.env`, then:
+
+```bash
+docker compose --profile full up -d --build
+docker compose --profile full run --rm server python acme/db/seed.py
+docker compose --profile full run --rm server python scripts/ingest_kb.py
+```
+
+The server is now on `http://127.0.0.1:8000/mcp`. Run the agent from a local virtual environment (`pip install -r requirements.txt`):
+
+```bash
+python agent/agent.py
+```
+
+The sections below explain how it was built, phase by phase.
 
 ---
 
@@ -277,6 +315,24 @@ Use `python agent/agent.py viewer` for a read-only session, and set `GEMINI_MODE
 
 ---
 
+## Phase 6: Evals, cost, and deployment
+
+```bash
+python scripts/eval_agent.py
+```
+
+Each case in `evals/agent_set.json` runs through the real model and server, and checks which tools were called, which must **not** be called, and the key fact in the answer. Approvals are always refused, so no refund is issued. Seed the database first: refund windows depend on dates.
+
+**What testing the agent found:** after a person refused a refund, the model opened a ticket nobody asked for, and in another run asked for the same refund again. Both came from vague refusal messages. The server now returns one explicit "this is final" message for "no", decline and cancel, and the eval fails on either behaviour. This guides the model but does not force it; only refunds are blocked in code.
+
+**Cost:** the agent prints tokens and estimated cost per turn and per conversation. Prices are hard-coded in `agent/agent.py` with the date they were checked.
+
+**Deployment:** `docker compose --profile full up` runs the database and the MCP server, with both ports bound to localhost. A real deployment still needs HTTPS, managed secrets, and a non-default database password.
+
+**Eval limits:** 7 cases and one run each is a smoke test, not a benchmark. Answers are checked with regular expressions, and results can vary between runs.
+
+---
+
 ## Roadmap
 
 - [x] **Phase 0:** Acme backend (database, seed data, knowledge base)
@@ -285,7 +341,7 @@ Use `python agent/agent.py viewer` for a read-only session, and set `GEMINI_MODE
 - [x] **Phase 3:** RAG over the knowledge base with pgvector
 - [x] **Phase 4:** Remote transport, auth, permissions, and confirmation for risky actions
 - [x] **Phase 5:** Custom agent client
-- [ ] **Phase 6:** Evals, cost tracking, Docker deployment
+- [x] **Phase 6:** Evals, cost tracking, Docker deployment
 
 ---
 
